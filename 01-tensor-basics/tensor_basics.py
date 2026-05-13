@@ -118,6 +118,7 @@ print(f"x[:2, 1:]    = \n{x[:2, 1:]}")     # 前 2 行 × 后 2 列
 # x 是一个 tensor，所以可以使用这个运算符（由 pytorch 重载）
 mask = x > 4                              # 生成 bool 矩阵
 print(f"\nx > 4 (mask):\n{mask}")
+print(f"mask's type is {mask.dtype}")  # bool 类型
 # x 和 mask 的 shape 需要一致，得到的结果是 1d 的
 print(f"x[x > 4]:       {x[mask]}")       # 用 mask 提取满足条件的元素 → [5, 6, 7, 8, 9]
 
@@ -130,12 +131,88 @@ viewed   = x.view(9)          # 变成 1 维，9 个元素
 print(f"\nreshape(1, 9): {reshaped}")
 print(f"view(9):       {viewed}")
 
+# 思考
+# 如何理解 reshape 和 view 的区别？
+# view：只换解释方式，不搬数据。我要求你只改 shape，不要复制数据。做不到就报错
+# reshape：能不搬就不搬，实在不行就复制一份再换形状。我想要这个 shape。能不复制最好，不能的话你复制也行。
+# 当一个 Tensor 是连续的（contiguous）时，view 和 reshape 的结果一样，且都不复制数据
+# 但当 Tensor 是非连续的（例如经过转置或切片后），view 就无法工作（会报错），而 reshape 会自动复制数据以满足要求
+# reshape 在可能时返回 view，否则返回 copy；并且不要依赖它到底是 view 还是 copy
+
+# 用 untyped_storage().data_ptr() 可以观察 Tensor 是否可能共享同一块底层内存。
+# 注意：它只是教学调试用，实际业务代码一般不需要直接看 data_ptr。
+base = torch.arange(12).reshape(3, 4)
+base_view = base.view(2, 6)
+base_reshape = base.reshape(2, 6)
+
+print("\n--- view vs reshape：连续 Tensor ---")
+print(f"base:\n{base}")
+print(f"base.is_contiguous()         = {base.is_contiguous()}") # 判断是否连续
+print(f"base.stride()                = {base.stride()}") # stride 是步长，告诉我们在内存中如何跳跃访问元素。对于连续 Tensor，stride 的值是递减的，且最后一个维度的 stride 是 1。
+print(f"base_view.shape              = {base_view.shape}")
+print(f"base_reshape.shape           = {base_reshape.shape}")
+# 通过判断起始地址的方式来验证它们是否共享内存
+print(f"base 和 base_view 共享内存?    {base.untyped_storage().data_ptr() == base_view.untyped_storage().data_ptr()}")
+print(f"base 和 base_reshape 共享内存? {base.untyped_storage().data_ptr() == base_reshape.untyped_storage().data_ptr()}")
+
+# transpose / T 会交换维度，但通常不会重新排列底层数据；（transpose() 是典型的 view 操作，不发生数据移动）
+# 它只是改变 shape 和 stride，所以结果经常是非连续的。
+non_contiguous = base.T
+
+print("\n--- 制造非连续 Tensor：transpose / T ---")
+print(f"non_contiguous = base.T:\n{non_contiguous}")
+print(f"non_contiguous.is_contiguous() = {non_contiguous.is_contiguous()}")
+print(f"non_contiguous.stride()        = {non_contiguous.stride()}")
+
+print("\n--- 非连续 Tensor 上尝试 view / reshape ---")
+try:
+    print(non_contiguous.view(2, 6))
+except RuntimeError as e:
+    print(f"non_contiguous.view(2, 6) 报错: {e}")
+
+reshaped_from_non_contiguous = non_contiguous.reshape(2, 6)
+print(f"non_contiguous.reshape(2, 6):\n{reshaped_from_non_contiguous}")
+print(f"reshape 后是否连续? {reshaped_from_non_contiguous.is_contiguous()}")
+print(
+    "reshape 结果和 non_contiguous 共享内存? "
+    f"{non_contiguous.untyped_storage().data_ptr() == reshaped_from_non_contiguous.untyped_storage().data_ptr()}"
+)
+
+### TODO：代码读到这里 ###
+
+# contiguous() 会按当前逻辑顺序复制一份连续内存；
+# 有了连续内存后，就可以安全使用 view。
+made_contiguous = non_contiguous.contiguous()
+view_after_contiguous = made_contiguous.view(2, 6)
+
+print("\n--- 用 contiguous() 把非连续 Tensor 变连续 ---")
+print(f"made_contiguous:\n{made_contiguous}")
+print(f"made_contiguous.is_contiguous() = {made_contiguous.is_contiguous()}")
+print(f"made_contiguous.stride()        = {made_contiguous.stride()}")
+print(f"made_contiguous.view(2, 6):\n{view_after_contiguous}")
+print(
+    "made_contiguous 和原 non_contiguous 共享内存? "
+    f"{made_contiguous.untyped_storage().data_ptr() == non_contiguous.untyped_storage().data_ptr()}"
+)
+
 #  unsqueeze：在指定位置插入一个大小为 1 的维度
 #  squeeze：  移除所有大小为 1 的维度
 a = torch.tensor([1, 2, 3])          # shape (3,)
 print(f"\n原始:      shape={a.shape}")
 print(f"unsqueeze(0): shape={a.unsqueeze(0).shape}")   # (1, 3)
 print(f"unsqueeze(1): shape={a.unsqueeze(1).shape}")   # (3, 1)
+
+# unsqueeze 的等价写法（切片语法）：
+_ = a[None, :]     # 等价于 a.unsqueeze(0)
+_ = a[:, None]     # 等价于 a.unsqueeze(1)
+
+# 思考
+# unsqueeze是插入一个为1的维度，reshape不是可以直接做到吗？
+# 很多情况下 reshape 能做到和 unsqueeze 一样的事。但两者语义和安全性不同
+# unsqueeze(dim) 的意思非常明确：只在指定位置插入一个大小为 1 的维度
+# 而且，unsqueeze 通常只是创建一个 view，不复制数据，和原 tensor 共享底层存储
+# 而 reshape 的意思是：把 tensor 改成一个新的整体形状，只要求元素总数不变
+# reshape 也可能返回 view，但在某些情况下可能会复制数据，尤其是原 tensor 非连续时。它的语义更宽泛
 
 b = torch.zeros(1, 2, 1, 3)          # shape (1, 2, 1, 3)
 print(f"\nsqueeze 前:  {b.shape}")
